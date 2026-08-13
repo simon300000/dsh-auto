@@ -1,7 +1,7 @@
 {
   "name": "dsh-auto",
   "version": "0.1.0",
-  "description": "DeepSeek Harness WebUI 的中文模型自动审批插件",
+  "description": "Model-reviewed Auto Approve permission preset for the DeepSeek Harness Web UI",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -9,7 +9,7 @@
   },
   "files": [
     "src/index.js",
-    "prompts/*.zh.md",
+    "prompts/*.md",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",

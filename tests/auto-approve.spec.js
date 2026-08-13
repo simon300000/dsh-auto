@@ -1,130 +1,367 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  apply,
+  assessmentSchema,
+  buildReviewEvidence,
   createAutoApprovalHandler,
+  enforceHostPolicy,
   exactAction,
-  frameTranscript,
   parseAssessment,
   resolveConfig,
 } from '../src/index.js'
 
-function sessionWith(preset, overrides = {}) {
+function event(type, data, seq) {
+  return { type, data, seq, time: seq }
+}
+
+function sessionWith(preset = 'auto-approve', overrides = {}) {
   const events = [
-    { type: 'permission/preset', data: { preset } },
-    { type: 'tool/call', data: { callId: 'call-1', name: 'bash', arguments: '{"cmd":"npm test"}' } },
+    event('permission/preset', { preset }, 0),
+    event('user/message', {
+      id: 'user-1',
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: '请运行测试' }],
+    }, 1),
+    event('user/message', {
+      id: 'instructions-1',
+      role: 'user',
+      source: { kind: 'agent-instructions', form: 'instructions', changes: [] },
+      content: [{ type: 'text', text: 'Instructions from: AGENTS.md\n\n只运行项目测试。' }],
+    }, 2),
+    event('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'assistant-1',
+        role: 'assistant',
+        source: { kind: 'model', provider: 'main', model: 'main' },
+        content: [{ type: 'text', text: '我会运行测试。' }],
+      },
+    }, 3),
+    event('tool/call', {
+      turn: 1,
+      step: 1,
+      callId: 'ask-1',
+      name: 'ask_user_question',
+      arguments: '{"questions":[{"id":"confirm","question":"运行测试？"}]}',
+    }, 4),
+    event('tool/result', {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'tool',
+        source: { kind: 'tool', callId: 'ask-1' },
+        content: [{ type: 'text', text: '{"answers":[{"id":"confirm","selected":["允许"]}]}' }],
+      },
+    }, 5),
+    event('tool/call', {
+      turn: 1,
+      step: 1,
+      callId: 'call-1',
+      name: 'bash',
+      arguments: '{"command":"npm test","sandbox_permissions":"danger-full-access","justification":"运行项目测试"}',
+    }, 6),
   ]
   return {
     id: 'session-1',
     events,
     header: { cwd: '/workspace' },
-    deriveMessages: () => [{
-      role: 'user',
-      source: { kind: 'user' },
-      content: [{ type: 'text', text: '请运行测试' }],
-    }],
-    requestHeader: () => ({ config: { provider: 'reviewer', model: 'safe-model' } }),
+    requestHeader: () => ({
+      config: { provider: 'reviewer', model: 'safe-model' },
+      system: 'MAIN SYSTEM INSTRUCTIONS',
+    }),
     ...overrides,
   }
 }
 
 function requestWith(preset = 'auto-approve', overrides = {}) {
+  const agent = {
+    session: sessionWith(preset),
+    options: {},
+    inject: vi.fn(),
+    cancel: vi.fn(),
+  }
   return {
-    agent: { session: sessionWith(preset), options: {} },
+    agent,
     toolName: 'bash',
     callId: 'call-1',
-    reason: '需要执行命令',
+    reason: 'escalate sandbox to danger-full-access: 运行项目测试',
     ...overrides,
   }
 }
 
-function contextWith(outputs) {
-  let calls = 0
-  const stream = vi.fn(() => (async function * () {
-    const output = outputs[Math.min(calls, outputs.length - 1)]
-    calls += 1
-    yield { type: 'text-delta', index: 0, text: output }
-    yield { type: 'finish', reason: { kind: 'stop' } }
-  })())
+function reviewerRun(structured, overrides = {}) {
   return {
-    llm: { stream },
+    id: 'reviewer-session-1',
+    localAgent: {
+      session: {
+        events: [
+          event('step/start', { turn: 1, step: 1 }, 0),
+          event('tool/call', { turn: 1, step: 1, callId: 'r1', name: 'read', arguments: '{}' }, 1),
+          event('step/start', { turn: 1, step: 2 }, 2),
+        ],
+      },
+    },
+    result: Promise.resolve({ stopReason: 'completed', structured, output: [] }),
+    dispose: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  }
+}
+
+function contextWith(runs) {
+  const queue = Array.isArray(runs) ? [...runs] : [runs]
+  return {
+    subagents: {
+      start: vi.fn().mockImplementation(() => Promise.resolve(queue.shift())),
+    },
+    get: vi.fn(name => name === 'sandboxPolicy'
+      ? { resolve: () => ({ mode: 'workspace-write' }) }
+      : name === 'approval'
+        ? { config: { policy: 'ask' }, overrideOf: () => undefined }
+        : undefined),
     logger: { info: vi.fn(), warn: vi.fn() },
   }
 }
 
-describe('审查协议', () => {
-  it('解析严格的允许和拒绝结果', () => {
-    expect(parseAssessment('{"outcome":"allow","risk_level":"low","rationale":"范围明确"}').outcome).toBe('allow')
-    expect(parseAssessment('{"outcome":"deny","risk_level":"high","rationale":"缺少授权"}').outcome).toBe('deny')
+const allow = Object.freeze({
+  risk_level: 'low',
+  user_authorization: 'high',
+  outcome: 'allow',
+  rationale: '用户明确要求运行范围内的测试。',
+})
+
+const deny = Object.freeze({
+  risk_level: 'high',
+  user_authorization: 'low',
+  outcome: 'deny',
+  rationale: '提权范围超过运行测试所需。',
+})
+
+describe('结构化审查协议', () => {
+  it('只要求 outcome，并为省略字段采用保守且与 Codex 一致的默认值', () => {
+    expect(parseAssessment(allow)).toEqual(allow)
+    expect(parseAssessment({ outcome: 'allow' })).toEqual({
+      risk_level: 'low',
+      user_authorization: 'unknown',
+      outcome: 'allow',
+      rationale: '自动审查返回低风险允许决定。',
+    })
+    expect(parseAssessment({ outcome: 'deny' })).toEqual({
+      risk_level: 'high',
+      user_authorization: 'unknown',
+      outcome: 'deny',
+      rationale: '自动审查返回拒绝决定，但没有提供理由。',
+    })
+    expect(() => parseAssessment({ ...allow, risk_level: 'urgent' })).toThrow(/risk_level/)
+    expect(() => parseAssessment({ ...allow, user_authorization: 'yes' })).toThrow(/user_authorization/)
+    expect(parseAssessment({ ...allow, rationale: ' ' }).rationale).toBe('自动审查返回低风险允许决定。')
+    expect(() => parseAssessment({ ...allow, confidence: 1 })).toThrow(/未知字段 confidence/)
   })
 
-  it('拒绝缺字段、非法结果和非 JSON 文本', () => {
-    expect(() => parseAssessment('{"outcome":"allow"}')).toThrow(/risk_level/)
-    expect(() => parseAssessment('{"outcome":"maybe","risk_level":"low","rationale":"未知"}')).toThrow(/outcome/)
-    expect(() => parseAssessment('允许')).toThrow(/JSON/)
+  it('schema 包含完整字段，但只把 outcome 设为必填', () => {
+    expect(assessmentSchema.properties.risk_level.enum).toContain('critical')
+    expect(assessmentSchema.properties.user_authorization.enum).toEqual(['unknown', 'low', 'medium', 'high'])
+    expect(assessmentSchema.required).toEqual(['outcome'])
+  })
+
+  it('宿主把不一致的 allow 降级，但不升级 deny', () => {
+    expect(enforceHostPolicy({ ...allow, risk_level: 'critical' }).outcome).toBe('deny')
+    expect(enforceHostPolicy({ ...allow, risk_level: 'high', user_authorization: 'low' }).outcome).toBe('deny')
+    expect(enforceHostPolicy({ ...allow, risk_level: 'high', user_authorization: 'medium' }).outcome).toBe('allow')
+    expect(enforceHostPolicy(deny)).toBe(deny)
   })
 })
 
-describe('Auto Approve 应答器', () => {
+describe('Auto Approve Reviewer 子 Agent', () => {
   it('只接管 auto-approve，其他档位继续走 Web 人工审批链', async () => {
-    const ctx = contextWith(['{"outcome":"allow","risk_level":"low","rationale":"可以"}'])
+    const ctx = contextWith(reviewerRun(allow))
     const next = vi.fn().mockResolvedValue('allowed-once')
     const outcome = await createAutoApprovalHandler(ctx, resolveConfig())(requestWith('workspace-write'), next)
     expect(outcome).toBe('allowed-once')
     expect(next).toHaveBeenCalledOnce()
-    expect(ctx.llm.stream).not.toHaveBeenCalled()
+    expect(ctx.subagents.start).not.toHaveBeenCalled()
   })
 
-  it('允许审查器批准的精确工具调用，并使用中文提示词', async () => {
-    const ctx = contextWith(['{"outcome":"allow","risk_level":"low","rationale":"用户明确要求运行测试"}'])
+  it('为一次审批启动一个受限 spawn Reviewer，并读取 structured 结果', async () => {
+    const run = reviewerRun(allow)
+    const ctx = contextWith(run)
+    const request = requestWith()
+    const config = resolveConfig({
+      reviewerProvider: 'deepseek-official',
+      reviewerModel: 'deepseek-v4-flash',
+      reviewerReasoningEffort: 'high',
+    })
+    const outcome = await createAutoApprovalHandler(ctx, config)(request, vi.fn())
+
+    expect(outcome).toBe('allowed-once')
+    expect(ctx.subagents.start).toHaveBeenCalledOnce()
+    const [provider, start] = ctx.subagents.start.mock.calls[0]
+    expect(provider).toBe('spawn')
+    expect(start).toMatchObject({
+      label: '_auto-approve:call-1',
+      parent: request.agent,
+      agentOptions: {
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+        maxTokens: 8_192,
+      },
+      persona: expect.stringContaining('独立安全审批 Reviewer'),
+      toolFilter: { allow: ['read', 'glob', 'grep'] },
+      outputSchema: assessmentSchema,
+      maxDepth: 1,
+    })
+    expect(start.prompt[0].text).toContain('MAIN SYSTEM INSTRUCTIONS')
+    expect(start.prompt[0].text).toContain('Instructions from: AGENTS.md')
+    expect(start.prompt[0].text).toContain('justification')
+    expect(start.prompt[0].text).toContain('trusted_for_authorization')
+    expect(run.dispose).toHaveBeenCalledOnce()
+    expect(request.agent.inject).toHaveBeenCalledWith(expect.objectContaining({
+      content: [{ type: 'text', text: expect.stringContaining('Reviewer 会话：reviewer-session-1') }],
+      source: expect.objectContaining({ summary: 'Auto Approve：允许' }),
+    }))
+  })
+
+  it('一次 Reviewer 正常 deny 后直接拒绝，不重新审查或转人工', async () => {
+    const ctx = contextWith(reviewerRun(deny))
     const next = vi.fn()
     const outcome = await createAutoApprovalHandler(ctx, resolveConfig())(requestWith(), next)
-    expect(outcome).toBe('allowed-once')
+    expect(outcome).toBe('rejected')
+    expect(ctx.subagents.start).toHaveBeenCalledOnce()
     expect(next).not.toHaveBeenCalled()
-    const options = ctx.llm.stream.mock.calls[0][0]
-    expect(options.system).toContain('独立安全审批器')
-    expect(options.system).toContain('不得批准读取、打印、上传或转发 API 密钥')
-    expect(options.messages[0].content[0].text).toContain('npm test')
   })
 
-  it('无效输出重试到上限后失败关闭', async () => {
-    const ctx = contextWith(['不是 JSON'])
-    const outcome = await createAutoApprovalHandler(ctx, resolveConfig({ maxAttempts: 3 }))(requestWith(), vi.fn())
-    expect(outcome).toBe('rejected')
-    expect(ctx.llm.stream).toHaveBeenCalledTimes(3)
-    expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('失败关闭'))
-  })
-
-  it('有 callId 却找不到原始参数时直接拒绝', async () => {
-    const ctx = contextWith(['{"outcome":"allow","risk_level":"low","rationale":"可以"}'])
-    const request = requestWith('auto-approve', {
-      agent: { session: sessionWith('auto-approve', { events: [{ type: 'permission/preset', data: { preset: 'auto-approve' } }] }), options: {} },
+  it('子 Agent 异常、无 structured 输出或缺少精确动作时失败关闭', async () => {
+    const failedRun = reviewerRun(undefined, {
+      result: Promise.resolve({ stopReason: 'error', output: [] }),
     })
-    const outcome = await createAutoApprovalHandler(ctx, resolveConfig())(request, vi.fn())
-    expect(outcome).toBe('rejected')
-    expect(ctx.llm.stream).not.toHaveBeenCalled()
+    const ctx = contextWith(failedRun)
+    expect(await createAutoApprovalHandler(ctx, resolveConfig())(requestWith(), vi.fn())).toBe('rejected')
+    expect(ctx.subagents.start).toHaveBeenCalledOnce()
+
+    const missing = requestWith('auto-approve', { callId: undefined })
+    expect(await createAutoApprovalHandler(ctx, resolveConfig())(missing, vi.fn())).toBe('rejected')
+    expect(ctx.subagents.start).toHaveBeenCalledOnce()
+  })
+
+  it('连续三次有效拒绝会在当前 turn 结束后中断父 Agent', async () => {
+    vi.useFakeTimers()
+    const runs = [reviewerRun(deny), reviewerRun(deny), reviewerRun(deny)]
+    const ctx = contextWith(runs)
+    const request = requestWith()
+    const handler = createAutoApprovalHandler(ctx, resolveConfig({ maxConsecutiveDenials: 3 }))
+
+    await handler(request, vi.fn())
+    await handler(request, vi.fn())
+    await handler(request, vi.fn())
+    expect(request.agent.cancel).not.toHaveBeenCalled()
+    await vi.runAllTimersAsync()
+    expect(request.agent.cancel).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'hook',
+      reason: expect.stringContaining('连续拒绝了 3 次'),
+    }))
+    expect(request.agent.inject.mock.calls.at(-1)[0].content[0].text).toContain('3/3')
+    vi.useRealTimers()
   })
 })
 
-describe('输入边界', () => {
-  it('默认总超时为 30 秒', () => {
-    expect(resolveConfig().timeoutMs).toBe(30_000)
+describe('Reviewer 创建期隔离', () => {
+  it('在首次请求前钉死只读沙箱、工具 guard、推理等级和 step 上限', async () => {
+    const listeners = new Map()
+    const ctx = {
+      on: vi.fn((name, listener) => {
+        listeners.set(name, listener)
+        return vi.fn()
+      }),
+    }
+    apply(ctx, {
+      reviewerProvider: 'deepseek-official',
+      reviewerModel: 'deepseek-v4-flash',
+      reviewerReasoningEffort: 'high',
+      maxInvestigationSteps: 4,
+    })
+
+    const approval = contextWith(reviewerRun(allow))
+    const request = requestWith()
+    await createAutoApprovalHandler(approval, resolveConfig({ reviewerReasoningEffort: 'high' }))(request, vi.fn())
+    const start = approval.subagents.start.mock.calls[0][1]
+    const scopedListeners = new Map()
+    let guard
+    const reviewer = {
+      options: start.agentOptions,
+      session: { append: vi.fn() },
+      ctx: {
+        tools: { guard: vi.fn(candidate => { guard = candidate }) },
+        on: vi.fn((name, listener) => { scopedListeners.set(name, listener); return vi.fn() }),
+      },
+    }
+    listeners.get('agent/created')({ agent: reviewer })
+
+    expect(reviewer.session.append).toHaveBeenCalledWith('sandbox/mode', {
+      mode: 'read-only',
+      source: 'delegation',
+    })
+    expect(reviewer.session.append).toHaveBeenCalledWith('approval/policy', {
+      policy: 'never',
+      source: 'delegation',
+    })
+    expect(guard({ name: 'read', arguments: { file_path: 'src/index.js' } })).toBeUndefined()
+    expect(guard({ name: 'structured_output' })).toBeUndefined()
+    expect(guard({ name: 'write' })).toMatch(/只允许只读/)
+    expect(guard({ name: 'read', arguments: { file_path: '.env' } })).toBeUndefined()
+    expect(guard({ name: 'grep', arguments: { pattern: 'token', path: '.ssh' } })).toBeUndefined()
+    expect(guard({ name: 'grep', arguments: { pattern: 'token', include: '*.ts' } })).toBeUndefined()
+    await expect(scopedListeners.get('agent/request')({}, () => Promise.resolve({ provider: 'p', model: 'm' })))
+      .resolves.toMatchObject({ reasoningEffort: 'high' })
+    await expect(scopedListeners.get('agent/pre-step')({ step: 5 }, () => Promise.resolve({ kind: 'enter' })))
+      .resolves.toEqual({ kind: 'enter' })
+    await expect(scopedListeners.get('agent/pre-step')({ step: 6 }, vi.fn()))
+      .resolves.toEqual({ kind: 'reject' })
+  })
+})
+
+describe('输入装配与配置', () => {
+  it('默认总时限为 90 秒并校验正整数', () => {
+    expect(resolveConfig().timeoutMs).toBe(90_000)
+    expect(resolveConfig().maxInvestigationSteps).toBe(4)
+    expect(() => resolveConfig({ maxConsecutiveDenials: 0 })).toThrow(/正整数/)
+    expect(() => resolveConfig({ reviewerReasoningEffort: ' ' })).toThrow(/reviewerReasoningEffort/)
   })
 
-  it('保留原始工具参数与工作目录', () => {
+  it('精确动作保留 turn、step、原始参数、审批原因和 cwd', () => {
     expect(exactAction(requestWith())).toEqual({
       toolName: 'bash',
       callId: 'call-1',
-      arguments: '{"cmd":"npm test"}',
-      reason: '需要执行命令',
+      turn: 1,
+      step: 1,
+      arguments: '{"command":"npm test","sandbox_permissions":"danger-full-access","justification":"运行项目测试"}',
+      approvalReason: 'escalate sandbox to danger-full-access: 运行项目测试',
       cwd: '/workspace',
     })
   })
 
-  it('限制交给审查器的历史数量和单条长度', () => {
-    const messages = Array.from({ length: 4 }, (_, index) => ({
-      role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `${index}-${'x'.repeat(100)}` }],
-    }))
-    const framed = frameTranscript(messages, resolveConfig({ maxMessages: 2, maxMessageChars: 40 }))
-    expect(framed).toHaveLength(2)
-    expect(framed.every((item) => item.length === 40)).toBe(true)
+  it('从原始 events 分离 system、AGENTS、消息、工具和当前权限', () => {
+    const request = requestWith()
+    const ctx = contextWith(reviewerRun(allow))
+    const evidence = buildReviewEvidence(ctx, request, exactAction(request), resolveConfig())
+    expect(evidence.main_agent_instructions.system).toEqual({
+      trusted_for_policy: true,
+      trusted_for_authorization: true,
+      content: 'MAIN SYSTEM INSTRUCTIONS',
+    })
+    expect(evidence.main_agent_instructions).not.toHaveProperty('developer')
+    expect(evidence.main_agent_instructions).not.toHaveProperty('developer_note')
+    expect(evidence.main_agent_instructions.workspace_instructions.records[0]).toContain('AGENTS.md')
+    expect(evidence.main_agent_instructions.workspace_instructions.records[0])
+      .toContain('"trusted_for_authorization":true')
+    expect(evidence.transcript.messages.records.some(record => record.includes('trusted_for_authorization'))).toBe(true)
+    expect(evidence.transcript.tools.records.some(record => record.includes('tool_call'))).toBe(true)
+    expect(evidence.transcript.tools.records.some(record => record.includes('ask-1')
+      && record.includes('"trusted_for_authorization":true'))).toBe(true)
+    expect(evidence.current_permissions).toEqual({
+      permission_preset: 'auto-approve',
+      sandbox_mode: 'workspace-write',
+      approval_policy: 'ask',
+    })
   })
 })

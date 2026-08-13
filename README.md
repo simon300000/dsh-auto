@@ -2,17 +2,21 @@
 
 English | [中文](README.zh.md)
 
-`dsh-auto` adds an `Auto Approve` permission preset to the DeepSeek Harness Web UI. It keeps the agent inside the `workspace-write` sandbox while an independent model reviews each action that would otherwise require human approval.
+`dsh-auto` adds an `Auto Approve` permission preset to the DeepSeek Harness Web UI. Each action that requires approval is reviewed by a fresh, restricted DSH child Agent before the plugin allows or denies it.
 
-The current release supports the Web UI only. It does not add a TUI surface.
+The current release supports the Web UI only.
 
-## Behavior
+## How it works
 
-- The plugin handles `approval/request` only when the current session explicitly selects `Auto Approve`. Every other preset continues through the Web UI's existing human approval flow.
-- The reviewer uses the current session's provider and model by default. Set both `reviewerProvider` and `reviewerModel` to use a dedicated model.
-- The reviewer receives bounded recent history, the exact tool-call arguments, and the working directory. Conversation and tool content are treated as untrusted data.
-- Each approval applies only to the exact action under review. A timeout, model error, invalid JSON response, missing `callId` arguments, or oversized input rejects the action.
-- The default total timeout is 30 seconds, with at most three attempts.
+- The plugin handles `approval/request` only when the session selects `Auto Approve`. Other permission presets continue through DSH's existing approval chain.
+- Each approval starts one `spawn` Reviewer session. DSH's own agent loop handles any bounded `read`, `glob`, or `grep` investigation and captures the final structured result; the plugin does not implement a separate model/tool loop.
+- The child is created with a read-only sandbox and `approval/policy = never`. An execution guard denies every tool except `read`, `glob`, `grep`, and the scoped structured-output tool, permits no further subagents, and allows at most four investigation steps plus the final response step. Sensitive files may be inspected only when a minimal read-only check can change the decision.
+- The Reviewer receives the exact pending action, approval reason, current permissions, bounded raw session events, the main Agent's assembled system instructions, and AGENTS.md or equivalent workspace instructions. Direct user messages, human answers returned by `ask_user_question`, assembled system instructions, and workspace instructions can establish authorization; assistant content and other tool results remain untrusted evidence.
+- Only `outcome` is required in the structured result. A compact `{"outcome":"allow"}` defaults to low risk and unknown authorization; omitted fields on a denial default to high risk and unknown authorization. Explicit assessments may also contain `risk_level`, `user_authorization`, and `rationale`. The host always denies critical risk and denies high risk without at least medium user authorization. Invalid output, missing action data, timeout, cancellation-independent infrastructure failure, and tool failure all fail closed.
+- A successful model denial is not retried and never falls back to a user prompt. The default 90-second deadline covers child creation, all model steps, local read-only investigation, and final structured output.
+- Three consecutive denials in the same parent turn interrupt that turn. Any allowed action resets the counter. Each approval is still isolated in its own child session.
+
+The parent session records the approval events and a compact plugin notice. The Reviewer child session uses an `_auto-approve:<callId>` label and contains its messages, investigation tool calls and results, final assessment, and turn end. Console logs contain identifiers, model route, step count, stop reason, risk, authorization, and outcome, but not full prompts or file contents.
 
 ## Install
 
@@ -22,11 +26,11 @@ Install [simon300000/dsh-auto](https://github.com/simon300000/dsh-auto) from Git
 dsh plugin --profile web add github:simon300000/dsh-auto
 ```
 
-Open the Web UI and select `Auto Approve` from the session Permissions selector. The preset also appears in the default-permission selector under General Settings.
+Restart the Web UI, then select `Auto Approve` in the session Permissions selector or as the default permission preset in General Settings.
 
-## Configure a dedicated reviewer
+## Configuration
 
-Edit the `dsh-auto-approve` row in this package's `cordis.patch.yml`, or override the complete row with the same `id` in the profile's `cordis.patch.yml`:
+The bundled defaults use `deepseek-official/deepseek-v4-flash` with `high` reasoning:
 
 ```yaml
 - id: dsh-auto-approve
@@ -34,24 +38,24 @@ Edit the `dsh-auto-approve` row in this package's `cordis.patch.yml`, or overrid
   config:
     reviewerProvider: deepseek-official
     reviewerModel: deepseek-v4-flash
-    timeoutMs: 30000
-    maxAttempts: 3
-    maxMessages: 40
-    maxMessageChars: 4000
+    reviewerReasoningEffort: high
+    timeoutMs: 90000
+    maxInvestigationSteps: 4
+    maxConsecutiveDenials: 3
+    maxMessageTranscriptTokens: 10000
+    maxToolTranscriptTokens: 10000
+    maxMessageEntryTokens: 2000
+    maxToolEntryTokens: 1000
+    maxSystemInstructionTokens: 10000
+    maxAgentInstructionTokens: 10000
+    maxRecentNonUserEntries: 40
     maxActionChars: 16000
-    maxOutputTokens: 768
+    maxOutputTokens: 8192
 ```
 
-`reviewerProvider` and `reviewerModel` must be set together. A profile layer replaces the entire `config` value of a matching bundle row, so an override must repeat every setting it needs to retain.
+`reviewerProvider` and `reviewerModel` must be set together. If both are omitted, the Reviewer uses the parent session's current provider and model. A profile override replaces the complete matching bundle-row `config`, so repeat every value that should remain configured.
 
-## Policy files
-
-The review policy has two files:
-
-- `prompts/policy-template.zh.md` defines the reviewer role, authorization evidence, risk levels, and JSON protocol.
-- `prompts/policy.zh.md` defines additional rules for secrets, exfiltration, destructive actions, production systems, and publication.
-
-Restart dsh after changing either policy or the plugin code.
+The Reviewer persona and the additional security rules live in `prompts/policy-template.md` and `prompts/policy.md`. Restart DSH after changing the configuration, policy, or plugin code.
 
 ## License
 

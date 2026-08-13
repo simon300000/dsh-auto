@@ -3,6 +3,7 @@ import {
   apply,
   assessmentSchema,
   buildReviewEvidence,
+  buildReviewPrompt,
   createAutoApprovalHandler,
   enforceHostPolicy,
   exactAction,
@@ -215,6 +216,12 @@ describe('Auto Approve Reviewer 子 Agent', () => {
     expect(start.prompt[0].text).toContain('Instructions from: AGENTS.md')
     expect(start.prompt[0].text).toContain('justification')
     expect(start.prompt[0].text).toContain('trusted_for_authorization')
+    expect(start.prompt[0].text).not.toContain('CACHEABLE')
+    expect(start.prompt[0].text).not.toContain('cacheable')
+    expect(start.prompt[0].text.indexOf('审查上下文'))
+      .toBeLessThan(start.prompt[0].text.indexOf('本次审批'))
+    expect(start.prompt[0].text.indexOf('MAIN SYSTEM INSTRUCTIONS'))
+      .toBeLessThan(start.prompt[0].text.indexOf('session-1'))
     expect(run.dispose).toHaveBeenCalledOnce()
     expect(request.agent.inject).toHaveBeenCalledWith(expect.objectContaining({
       content: [{ type: 'text', text: expect.stringContaining('Reviewer 会话：reviewer-session-1') }],
@@ -322,8 +329,17 @@ describe('Reviewer 创建期隔离', () => {
 
 describe('输入装配与配置', () => {
   it('默认总时限为 90 秒并校验正整数', () => {
-    expect(resolveConfig().timeoutMs).toBe(90_000)
-    expect(resolveConfig().maxInvestigationSteps).toBe(4)
+    expect(resolveConfig()).toMatchObject({
+      timeoutMs: 90_000,
+      maxInvestigationSteps: 4,
+      maxMessageTranscriptTokens: 4_000,
+      maxToolTranscriptTokens: 3_000,
+      maxMessageEntryTokens: 1_000,
+      maxToolEntryTokens: 512,
+      maxSystemInstructionTokens: 6_000,
+      maxAgentInstructionTokens: 6_000,
+      maxRecentNonUserEntries: 20,
+    })
     expect(() => resolveConfig({ maxConsecutiveDenials: 0 })).toThrow(/正整数/)
     expect(() => resolveConfig({ reviewerReasoningEffort: ' ' })).toThrow(/reviewerReasoningEffort/)
   })
@@ -344,24 +360,49 @@ describe('输入装配与配置', () => {
     const request = requestWith()
     const ctx = contextWith(reviewerRun(allow))
     const evidence = buildReviewEvidence(ctx, request, exactAction(request), resolveConfig())
-    expect(evidence.main_agent_instructions.system).toEqual({
+    expect(evidence.reviewer_context.main_agent_instructions.system).toEqual({
       trusted_for_policy: true,
       trusted_for_authorization: true,
       content: 'MAIN SYSTEM INSTRUCTIONS',
     })
-    expect(evidence.main_agent_instructions).not.toHaveProperty('developer')
-    expect(evidence.main_agent_instructions).not.toHaveProperty('developer_note')
-    expect(evidence.main_agent_instructions.workspace_instructions.records[0]).toContain('AGENTS.md')
-    expect(evidence.main_agent_instructions.workspace_instructions.records[0])
+    expect(evidence.reviewer_context.main_agent_instructions).not.toHaveProperty('developer')
+    expect(evidence.reviewer_context.main_agent_instructions).not.toHaveProperty('developer_note')
+    expect(evidence.reviewer_context.main_agent_instructions.workspace_instructions.records[0])
+      .toContain('AGENTS.md')
+    expect(evidence.reviewer_context.main_agent_instructions.workspace_instructions.records[0])
       .toContain('"trusted_for_authorization":true')
-    expect(evidence.transcript.messages.records.some(record => record.includes('trusted_for_authorization'))).toBe(true)
-    expect(evidence.transcript.tools.records.some(record => record.includes('tool_call'))).toBe(true)
-    expect(evidence.transcript.tools.records.some(record => record.includes('ask-1')
+    expect(evidence.approval_request.transcript.messages.records
+      .some(record => record.includes('trusted_for_authorization'))).toBe(true)
+    expect(evidence.approval_request.transcript.tools.records
+      .some(record => record.includes('tool_call'))).toBe(true)
+    expect(evidence.approval_request.transcript.tools.records.some(record => record.includes('ask-1')
       && record.includes('"trusted_for_authorization":true'))).toBe(true)
-    expect(evidence.current_permissions).toEqual({
+    expect(evidence.approval_request.current_permissions).toEqual({
       permission_preset: 'auto-approve',
       sandbox_mode: 'workspace-write',
       approval_policy: 'ask',
     })
+    expect(evidence.approval_request.reviewed_parent_session_id).toBe('session-1')
+    expect(evidence.approval_request.exact_action.callId).toBe('call-1')
+  })
+
+  it('把稳定指令放在动态审批数据之前，并使用两个独立 JSON 区段', () => {
+    const request = requestWith()
+    const evidence = buildReviewEvidence(
+      contextWith(reviewerRun(allow)),
+      request,
+      exactAction(request),
+      resolveConfig(),
+    )
+    const prompt = buildReviewPrompt(evidence)
+    const contextIndex = prompt.indexOf('审查上下文')
+    const approvalIndex = prompt.indexOf('本次审批')
+
+    expect(prompt).not.toMatch(/cacheable|dynamic/i)
+    expect(contextIndex).toBeGreaterThanOrEqual(0)
+    expect(approvalIndex).toBeGreaterThan(contextIndex)
+    expect(prompt.indexOf('MAIN SYSTEM INSTRUCTIONS')).toBeLessThan(approvalIndex)
+    expect(prompt.indexOf('session-1')).toBeGreaterThan(approvalIndex)
+    expect(prompt.indexOf('call-1')).toBeGreaterThan(approvalIndex)
   })
 })

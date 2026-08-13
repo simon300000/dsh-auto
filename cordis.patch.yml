@@ -29,12 +29,12 @@
         timeoutMs: 90000
         maxInvestigationSteps: 4
         maxConsecutiveDenials: 3
-        maxMessageTranscriptTokens: 10000
-        maxToolTranscriptTokens: 10000
-        maxMessageEntryTokens: 2000
-        maxToolEntryTokens: 1000
-        maxSystemInstructionTokens: 10000
-        maxAgentInstructionTokens: 10000
-        maxRecentNonUserEntries: 40
+        maxMessageTranscriptTokens: 4000
+        maxToolTranscriptTokens: 3000
+        maxMessageEntryTokens: 1000
+        maxToolEntryTokens: 512
+        maxSystemInstructionTokens: 6000
+        maxAgentInstructionTokens: 6000
+        maxRecentNonUserEntries: 20
         maxActionChars: 16000
         maxOutputTokens: 8192

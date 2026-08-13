@@ -11,7 +11,7 @@
 - 只有会话选择 `Auto Approve` 时，插件才接管 `approval/request`；其他权限档位继续使用 DSH 原有审批链。
 - 每次审批只启动一个 `spawn` Reviewer 会话。有限的 `read`、`glob`、`grep` 调查和最终结构化结果都由 DSH 自己的 agent loop 处理，插件不再实现另一套模型/工具循环。
 - 子 Agent 创建时会被固定为只读沙箱与 `approval/policy = never`。执行层 guard 会拒绝 `read`、`glob`、`grep` 和当前会话专用结构化输出工具以外的一切工具；它不能继续创建子 Agent，最多执行四个调查步骤和一个最终回答步骤。只有最小范围的只读检查可能改变决定时，才可以检查敏感文件。
-- Reviewer 会收到精确待审批动作、approval reason、当前权限、按预算截取的原始 session events、主 Agent 已装配的 system 指令，以及 AGENTS.md 等工作区指令。直接用户消息、`ask_user_question` 返回的人工回答、已装配的 system 指令和工作区指令都可以构成授权；assistant 内容和其他工具结果仍是不可信证据。
+- Reviewer 会收到精确待审批动作、approval reason、当前权限、按预算截取的原始 session events、主 Agent 已装配的 system 指令，以及 AGENTS.md 等工作区指令。稳定指令会单独序列化为可缓存前缀，位于 session 标识、transcript、权限和动作数据之前。直接用户消息、`ask_user_question` 返回的人工回答、已装配的 system 指令和工作区指令都可以构成授权；assistant 内容和其他工具结果仍是不可信证据。
 - 结构化结果只强制要求 `outcome`。简写 `{"outcome":"allow"}` 默认表示 low 风险、unknown 授权；deny 缺少其他字段时默认表示 high 风险、unknown 授权。完整结果还可以包含 `risk_level`、`user_authorization` 和 `rationale`。宿主一定拒绝 critical 风险，也会拒绝用户授权低于 medium 的 high 风险。无效输出、动作参数缺失、超时、非父请求取消导致的基础设施失败和工具失败全部按失败关闭。
 - 正常返回的 deny 不重试，也不会回退到用户弹窗。默认 90 秒总时限覆盖子 Agent 创建、所有模型步骤、本地只读调查和最终结构化输出。
 - 同一父 turn 连续拒绝三次后会中断该 turn；一次 allow 会清零计数。不同审批仍使用彼此隔离的 Reviewer 子会话。
@@ -42,13 +42,13 @@ dsh plugin --profile web add github:simon300000/dsh-auto
     timeoutMs: 90000
     maxInvestigationSteps: 4
     maxConsecutiveDenials: 3
-    maxMessageTranscriptTokens: 10000
-    maxToolTranscriptTokens: 10000
-    maxMessageEntryTokens: 2000
-    maxToolEntryTokens: 1000
-    maxSystemInstructionTokens: 10000
-    maxAgentInstructionTokens: 10000
-    maxRecentNonUserEntries: 40
+    maxMessageTranscriptTokens: 4000
+    maxToolTranscriptTokens: 3000
+    maxMessageEntryTokens: 1000
+    maxToolEntryTokens: 512
+    maxSystemInstructionTokens: 6000
+    maxAgentInstructionTokens: 6000
+    maxRecentNonUserEntries: 20
     maxActionChars: 16000
     maxOutputTokens: 8192
 ```

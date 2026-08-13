@@ -11,7 +11,7 @@ The current release supports the Web UI only.
 - The plugin handles `approval/request` only when the session selects `Auto Approve`. Other permission presets continue through DSH's existing approval chain.
 - Each approval starts one `spawn` Reviewer session. DSH's own agent loop handles any bounded `read`, `glob`, or `grep` investigation and captures the final structured result; the plugin does not implement a separate model/tool loop.
 - The child is created with a read-only sandbox and `approval/policy = never`. An execution guard denies every tool except `read`, `glob`, `grep`, and the scoped structured-output tool, permits no further subagents, and allows at most four investigation steps plus the final response step. Sensitive files may be inspected only when a minimal read-only check can change the decision.
-- The Reviewer receives the exact pending action, approval reason, current permissions, bounded raw session events, the main Agent's assembled system instructions, and AGENTS.md or equivalent workspace instructions. Direct user messages, human answers returned by `ask_user_question`, assembled system instructions, and workspace instructions can establish authorization; assistant content and other tool results remain untrusted evidence.
+- The Reviewer receives the exact pending action, approval reason, current permissions, bounded raw session events, the main Agent's assembled system instructions, and AGENTS.md or equivalent workspace instructions. Stable instructions are serialized in a separate cacheable prefix before session identifiers, transcripts, permissions, and action data. Direct user messages, human answers returned by `ask_user_question`, assembled system instructions, and workspace instructions can establish authorization; assistant content and other tool results remain untrusted evidence.
 - Only `outcome` is required in the structured result. A compact `{"outcome":"allow"}` defaults to low risk and unknown authorization; omitted fields on a denial default to high risk and unknown authorization. Explicit assessments may also contain `risk_level`, `user_authorization`, and `rationale`. The host always denies critical risk and denies high risk without at least medium user authorization. Invalid output, missing action data, timeout, cancellation-independent infrastructure failure, and tool failure all fail closed.
 - A successful model denial is not retried and never falls back to a user prompt. The default 90-second deadline covers child creation, all model steps, local read-only investigation, and final structured output.
 - Three consecutive denials in the same parent turn interrupt that turn. Any allowed action resets the counter. Each approval is still isolated in its own child session.
@@ -42,13 +42,13 @@ The bundled defaults use `deepseek-official/deepseek-v4-flash` with `high` reaso
     timeoutMs: 90000
     maxInvestigationSteps: 4
     maxConsecutiveDenials: 3
-    maxMessageTranscriptTokens: 10000
-    maxToolTranscriptTokens: 10000
-    maxMessageEntryTokens: 2000
-    maxToolEntryTokens: 1000
-    maxSystemInstructionTokens: 10000
-    maxAgentInstructionTokens: 10000
-    maxRecentNonUserEntries: 40
+    maxMessageTranscriptTokens: 4000
+    maxToolTranscriptTokens: 3000
+    maxMessageEntryTokens: 1000
+    maxToolEntryTokens: 512
+    maxSystemInstructionTokens: 6000
+    maxAgentInstructionTokens: 6000
+    maxRecentNonUserEntries: 20
     maxActionChars: 16000
     maxOutputTokens: 8192
 ```

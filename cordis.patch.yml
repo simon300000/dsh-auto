@@ -1,0 +1,31 @@
+# 此 bundle 必须安装在 dsh-web-app 之后。它覆盖权限预设表，并在 Web
+# 人工审批应答器之前插入中文模型审查器。
+
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      auto-approve:
+        sandbox: workspace-write
+        approval: ask
+        name: Auto Approve
+        description: 在工作区写入沙箱内，由中文安全审查模型逐次批准或拒绝高权限操作。
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+
+- insert:
+    - id: dsh-auto-approve
+      name: dsh-auto
+      config:
+        timeoutMs: 30000
+        maxAttempts: 3
+        maxMessages: 40
+        maxMessageChars: 4000
+        maxActionChars: 16000
+        maxOutputTokens: 768

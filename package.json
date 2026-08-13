@@ -1,0 +1,40 @@
+{
+  "name": "dsh-auto",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness WebUI 的中文模型自动审批插件",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src/index.js",
+    "prompts/*.zh.md",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "approval",
+    "webui"
+  ],
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "devDependencies": {
+    "vitest": "^4.1.8"
+  }
+}

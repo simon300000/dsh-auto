@@ -6,6 +6,20 @@
 
 当前版本只支持 WebUI。
 
+## 截图
+
+选择 `Auto Approve` 权限档位：
+
+![Auto Approve 权限档位](docs/images/auto-approve-permission.png)
+
+Reviewer 允许有限的只读操作：
+
+![Auto Approve 允许有限的只读操作](docs/images/auto-approve-allowed.png)
+
+Reviewer 拒绝缺少充分用户授权的高风险操作：
+
+![Auto Approve 拒绝高风险操作](docs/images/auto-approve-denied.png)
+
 ## 工作方式
 
 - 只有会话选择 `Auto Approve` 时，插件才接管 `approval/request`；其他权限档位继续使用 DSH 原有审批链。

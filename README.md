@@ -6,6 +6,20 @@ English | [中文](README.zh.md)
 
 The current release supports the Web UI only.
 
+## Screenshots
+
+Select the `Auto Approve` permission preset:
+
+![Auto Approve permission preset](docs/images/auto-approve-permission.png)
+
+The Reviewer allows a bounded read-only action:
+
+![Auto Approve allows a bounded read-only action](docs/images/auto-approve-allowed.png)
+
+The Reviewer denies a high-risk action without sufficient user authorization:
+
+![Auto Approve denies a high-risk action](docs/images/auto-approve-denied.png)
+
 ## How it works
 
 - The plugin handles `approval/request` only when the session selects `Auto Approve`. Other permission presets continue through DSH's existing approval chain.

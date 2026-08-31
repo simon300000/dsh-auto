@@ -50,6 +50,7 @@ The bundled defaults use `deepseek-official/deepseek-v4-flash` with `high` reaso
 - id: dsh-auto-approve
   name: dsh-auto
   config:
+    language: zh
     reviewerProvider: deepseek-official
     reviewerModel: deepseek-v4-flash
     reviewerReasoningEffort: high
@@ -66,6 +67,8 @@ The bundled defaults use `deepseek-official/deepseek-v4-flash` with `high` reaso
     maxActionChars: 16000
     maxOutputTokens: 8192
 ```
+
+`language` selects the language of the Reviewer's `rationale` and of the review notice injected into the session. It accepts `zh` (default) and `en`. The security policy itself is always evaluated in Chinese; only the output language changes.
 
 `reviewerProvider` and `reviewerModel` must be set together. If both are omitted, the Reviewer uses the parent session's current provider and model. A profile override replaces the complete matching bundle-row `config`, so repeat every value that should remain configured.
 

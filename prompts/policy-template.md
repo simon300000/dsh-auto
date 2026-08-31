@@ -49,6 +49,6 @@
 
 - `risk_level`: `low | medium | high | critical`
 - `user_authorization`: `unknown | low | medium | high`
-- `rationale`: 简短中文理由
+- `rationale`: {{ rationale_language }}
 
 不要只输出普通文本；只有成功调用 `structured_output` 才算完成审查。

@@ -11,6 +11,7 @@ const CHARS_PER_TOKEN = 4
 const MAX_NOTICE_REASON_CHARS = 1_000
 
 const DEFAULTS = Object.freeze({
+  language: 'zh',
   timeoutMs: 90_000,
   maxInvestigationSteps: 4,
   maxConsecutiveDenials: 3,
@@ -39,7 +40,26 @@ export const assessmentSchema = Object.freeze({
 
 const policyTemplate = readFileSync(new URL('../prompts/policy-template.md', import.meta.url), 'utf8').trim()
 const securityPolicy = readFileSync(new URL('../prompts/policy.md', import.meta.url), 'utf8').trim()
-const guardianPrompt = policyTemplate.replace('{{ security_policy }}', securityPolicy)
+
+/** rationale 的输出语言指令。指令本身用中文书写，模型才会稳定遵守。 */
+const RATIONALE_INSTRUCTIONS = Object.freeze({
+  zh: '简短中文理由',
+  en: '简短理由，必须用英文（English）书写，不要使用中文',
+})
+
+const LANGUAGES = Object.freeze(Object.keys(RATIONALE_INSTRUCTIONS))
+
+/** 只切换输出语言：安全策略正文一律保持中文，避免翻译改变判定语义。 */
+function buildGuardianPrompt(language) {
+  return policyTemplate
+    .replace('{{ security_policy }}', securityPolicy)
+    .replace('{{ rationale_language }}', RATIONALE_INSTRUCTIONS[language])
+}
+
+const guardianPrompts = Object.freeze({
+  zh: buildGuardianPrompt('zh'),
+  en: buildGuardianPrompt('en'),
+})
 
 /**
  * 挂载自动审批编排器及 Reviewer 的同步创建期隔离。只有 `auto-approve`
@@ -47,7 +67,7 @@ const guardianPrompt = policyTemplate.replace('{{ security_policy }}', securityP
  */
 export function apply(ctx, config) {
   const resolved = resolveConfig(config)
-  installReviewerIsolation(ctx)
+  installReviewerIsolation(ctx, resolved.language)
   const denials = new WeakMap()
   ctx.on('approval/request', createAutoApprovalHandler(ctx, resolved, denials), { prepend: true })
 }
@@ -66,6 +86,9 @@ export function resolveConfig(config = {}) {
   if (resolved.reviewerReasoningEffort !== undefined
     && (typeof resolved.reviewerReasoningEffort !== 'string' || resolved.reviewerReasoningEffort.trim() === '')) {
     throw new Error('dsh-auto: reviewerReasoningEffort 必须是非空字符串')
+  }
+  if (!LANGUAGES.includes(resolved.language)) {
+    throw new Error(`dsh-auto: language 必须是 ${LANGUAGES.join(' 或 ')}`)
   }
   for (const key of [
     'timeoutMs',
@@ -92,14 +115,14 @@ export function resolveConfig(config = {}) {
  * Reviewer 标记随 AgentOptions 进入未发布的子 Agent。同步 `agent/created`
  * 监听器在首次 prompt assembly 之前把沙箱钉为只读并安装单调 guard。
  */
-function installReviewerIsolation(ctx) {
+function installReviewerIsolation(ctx, language) {
   ctx.on('agent/created', ({ agent }) => {
     const options = agent.options[REVIEWER_OPTIONS]
     if (options === undefined) return
 
     agent.session.append('sandbox/mode', { mode: 'read-only', source: 'delegation' })
     agent.session.append('approval/policy', { policy: 'never', source: 'delegation' })
-    agent.ctx.tools.guard(reviewerToolGuard)
+    agent.ctx.tools.guard(createReviewerToolGuard(language))
 
     agent.ctx.on('agent/request', async (_request, next) => {
       const callConfig = await next()
@@ -114,10 +137,15 @@ function installReviewerIsolation(ctx) {
   })
 }
 
-function reviewerToolGuard(exec) {
-  return REVIEWER_EXECUTABLE_TOOLS.has(exec.name)
+const GUARD_MESSAGES = Object.freeze({
+  zh: name => `Auto Approve Reviewer 只允许只读调查工具，已拒绝 ${name}`,
+  en: name => `The Auto Approve Reviewer may only use read-only investigation tools; ${name} was denied.`,
+})
+
+function createReviewerToolGuard(language) {
+  return exec => REVIEWER_EXECUTABLE_TOOLS.has(exec.name)
     ? undefined
-    : `Auto Approve Reviewer 只允许只读调查工具，已拒绝 ${exec.name}`
+    : GUARD_MESSAGES[language](exec.name)
 }
 
 /** 创建可单测的 waterfall 监听器。 */
@@ -190,7 +218,7 @@ export function createAutoApprovalHandler(ctx, config, denialState = new WeakMap
             maxInvestigationSteps: config.maxInvestigationSteps,
           },
         },
-        persona: guardianPrompt,
+        persona: guardianPrompts[config.language],
         toolFilter: { allow: REVIEWER_TOOLS },
         outputSchema: assessmentSchema,
         maxDepth: 1,
@@ -227,7 +255,7 @@ export function createAutoApprovalHandler(ctx, config, denialState = new WeakMap
         consecutiveDenials: denial.count,
         denialThreshold: config.maxConsecutiveDenials,
         turnInterrupted: denial.interrupt,
-      })
+      }, config.language)
       if (denial.interrupt) queueTurnInterrupt(request.agent, denial.count)
       return assessment.outcome === 'allow' ? 'allowed-once' : 'rejected'
     } catch (error) {
@@ -257,7 +285,7 @@ export function createAutoApprovalHandler(ctx, config, denialState = new WeakMap
         denialThreshold: config.maxConsecutiveDenials,
         turnInterrupted: denial.interrupt,
         rationale: `自动审查失败并按失败关闭处理：${problem}`,
-      })
+      }, config.language)
       if (denial.interrupt) queueTurnInterrupt(request.agent, denial.count)
       return 'rejected'
     } finally {
@@ -290,7 +318,7 @@ function rejectWithoutReview(ctx, request, reason, config, denialState, turn = a
     denialThreshold: config.maxConsecutiveDenials,
     turnInterrupted: denial.interrupt,
     rationale: reason,
-  })
+  }, config.language)
   if (denial.interrupt) queueTurnInterrupt(request.agent, denial.count)
   return 'rejected'
 }
@@ -628,24 +656,57 @@ function countReviewerSteps(agent) {
   return agent.session.snapshotEvents().filter(event => event.type === 'step/start').length
 }
 
+/** 审查通知文案。安全策略本身不翻译，这里只切换通知的显示语言。 */
+const NOTICE_LABELS = Object.freeze({
+  zh: Object.freeze({
+    allowed: '允许',
+    denied: '拒绝',
+    headline: (verdict, toolName) => `Auto Approve 自动审查已${verdict}这次 ${toolName} 操作。`,
+    summary: verdict => `Auto Approve：${verdict}`,
+    riskLevel: '风险等级：',
+    userAuthorization: '用户授权：',
+    reviewerModel: '审查模型：',
+    reviewerSession: 'Reviewer 会话：',
+    steps: '调查步骤：',
+    consecutiveDenials: '当前 turn 连续拒绝：',
+    interrupted: '已达到阈值，将中断当前 turn。',
+    rationale: '理由：',
+  }),
+  en: Object.freeze({
+    allowed: 'allowed',
+    denied: 'denied',
+    headline: (verdict, toolName) => `Auto Approve automatically ${verdict} this ${toolName} action.`,
+    summary: verdict => `Auto Approve: ${verdict}`,
+    riskLevel: 'Risk level: ',
+    userAuthorization: 'User authorization: ',
+    reviewerModel: 'Reviewer model: ',
+    reviewerSession: 'Reviewer session: ',
+    steps: 'Investigation steps: ',
+    consecutiveDenials: 'Consecutive denials in this turn: ',
+    interrupted: 'The denial threshold is reached; the current turn will be interrupted.',
+    rationale: 'Rationale: ',
+  }),
+})
+
 /** 把安全摘要加入父 Agent；完整调查过程保留在 Reviewer 子 session。 */
-function injectReviewNotice(ctx, request, review) {
-  const verdict = review.outcome === 'allow' ? '允许' : '拒绝'
+function injectReviewNotice(ctx, request, review, language) {
+  const labels = NOTICE_LABELS[language]
+  const verdict = review.outcome === 'allow' ? labels.allowed : labels.denied
   const rationale = review.rationale.length <= MAX_NOTICE_REASON_CHARS
     ? review.rationale
     : `${review.rationale.slice(0, MAX_NOTICE_REASON_CHARS - 1)}…`
   const details = [
-    `Auto Approve 自动审查已${verdict}这次 ${request.toolName} 操作。`,
-    ...(review.risk_level === undefined ? [] : [`风险等级：${review.risk_level}`]),
-    ...(review.user_authorization === undefined ? [] : [`用户授权：${review.user_authorization}`]),
-    ...(review.route === undefined ? [] : [`审查模型：${review.route.provider}/${review.route.model}`]),
-    ...(review.reviewerSessionId === undefined ? [] : [`Reviewer 会话：${review.reviewerSessionId}`]),
-    `调查步骤：${review.steps}`,
+    labels.headline(verdict, request.toolName),
+    ...(review.risk_level === undefined ? [] : [`${labels.riskLevel}${review.risk_level}`]),
+    ...(review.user_authorization === undefined ? [] : [`${labels.userAuthorization}${review.user_authorization}`]),
+    ...(review.route === undefined ? [] : [`${labels.reviewerModel}${review.route.provider}/${review.route.model}`]),
+    ...(review.reviewerSessionId === undefined ? [] : [`${labels.reviewerSession}${review.reviewerSessionId}`]),
+    `${labels.steps}${review.steps}`,
     ...(review.consecutiveDenials === undefined || review.consecutiveDenials === 0
       ? []
-      : [`当前 turn 连续拒绝：${review.consecutiveDenials}/${review.denialThreshold}`]),
-    ...(review.turnInterrupted === true ? ['已达到阈值，将中断当前 turn。'] : []),
-    `理由：${rationale}`,
+      : [`${labels.consecutiveDenials}${review.consecutiveDenials}/${review.denialThreshold}`]),
+    ...(review.turnInterrupted === true ? [labels.interrupted] : []),
+    `${labels.rationale}${rationale}`,
   ]
   try {
     request.agent.inject({
@@ -656,7 +717,7 @@ function injectReviewNotice(ctx, request, review) {
         kind: 'plugin',
         plugin: 'dsh-auto',
         form: 'notice',
-        summary: `Auto Approve：${verdict}`,
+        summary: labels.summary(verdict),
       },
     })
   } catch (error) {

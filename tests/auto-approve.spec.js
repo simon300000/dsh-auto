@@ -346,6 +346,12 @@ describe('输入装配与配置', () => {
     expect(() => resolveConfig({ reviewerReasoningEffort: ' ' })).toThrow(/reviewerReasoningEffort/)
   })
 
+  it('输出语言默认中文，只接受 zh 和 en', () => {
+    expect(resolveConfig().language).toBe('zh')
+    expect(resolveConfig({ language: 'en' }).language).toBe('en')
+    expect(() => resolveConfig({ language: 'ja' })).toThrow(/language/)
+  })
+
   it('精确动作保留 turn、step、原始参数、审批原因和 cwd', () => {
     expect(exactAction(requestWith())).toEqual({
       toolName: 'bash',
@@ -406,5 +412,40 @@ describe('输入装配与配置', () => {
     expect(prompt.indexOf('MAIN SYSTEM INSTRUCTIONS')).toBeLessThan(approvalIndex)
     expect(prompt.indexOf('session-1')).toBeGreaterThan(approvalIndex)
     expect(prompt.indexOf('call-1')).toBeGreaterThan(approvalIndex)
+  })
+})
+
+describe('输出语言切换', () => {
+  it('en 只改输出语言，安全策略正文仍为中文，通知与工具 guard 使用英文', async () => {
+    const listeners = new Map()
+    apply({ on: vi.fn((name, listener) => { listeners.set(name, listener); return vi.fn() }) }, { language: 'en' })
+
+    const ctx = contextWith(reviewerRun(allow))
+    const request = requestWith()
+    const outcome = await createAutoApprovalHandler(ctx, resolveConfig({ language: 'en' }))(request, vi.fn())
+    expect(outcome).toBe('allowed-once')
+
+    const start = ctx.subagents.start.mock.calls[0][1]
+    expect(start.persona).toContain('必须用英文（English）书写')
+    expect(start.persona).not.toContain('简短中文理由')
+    expect(start.persona).toContain('独立安全审批 Reviewer')
+    expect(start.persona).toContain('critical` 必须拒绝')
+
+    const notice = request.agent.inject.mock.calls.at(-1)[0]
+    expect(notice.content[0].text).toContain('Auto Approve automatically allowed this bash action.')
+    expect(notice.content[0].text).toContain('Reviewer session: reviewer-session-1')
+    expect(notice.content[0].text).toContain('Rationale: ')
+    expect(notice.content[0].text).not.toContain('理由：')
+    expect(notice.source.summary).toBe('Auto Approve: allowed')
+
+    let guard
+    listeners.get('agent/created')({
+      agent: {
+        options: start.agentOptions,
+        session: { append: vi.fn() },
+        ctx: { tools: { guard: vi.fn(candidate => { guard = candidate }) }, on: vi.fn(() => vi.fn()) },
+      },
+    })
+    expect(guard({ name: 'write' })).toMatch(/read-only investigation tools/)
   })
 })

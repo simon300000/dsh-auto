@@ -50,6 +50,7 @@ dsh plugin --profile web add github:simon300000/dsh-auto
 - id: dsh-auto-approve
   name: dsh-auto
   config:
+    language: zh
     reviewerProvider: deepseek-official
     reviewerModel: deepseek-v4-flash
     reviewerReasoningEffort: high
@@ -66,6 +67,8 @@ dsh plugin --profile web add github:simon300000/dsh-auto
     maxActionChars: 16000
     maxOutputTokens: 8192
 ```
+
+`language` 决定 Reviewer `rationale` 与注入会话的审查通知使用的语言，可选 `zh`（默认）和 `en`。安全策略正文始终保持中文，只切换输出语言。
 
 `reviewerProvider` 和 `reviewerModel` 必须同时设置。两者都省略时，Reviewer 使用父 session 当前的 provider/model。profile 覆盖会替换同一 bundle 行的完整 `config`，因此应重复写出所有需要保留的值。
 

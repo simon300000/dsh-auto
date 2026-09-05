@@ -13,7 +13,7 @@
       auto-approve:
         sandbox: workspace-write
         approval: ask
-        name: 🉑 Auto Approve
+        name: 🛡️ Auto Approve
         description: 在工作区写入沙箱内自动批准或拒绝需要高权限的操作。
       danger-full-access:
         sandbox: danger-full-access
@@ -23,6 +23,7 @@
     - id: dsh-auto-approve
       name: dsh-auto
       config:
+        language: zh
         reviewerProvider: deepseek-official
         reviewerModel: deepseek-v4-flash
         reviewerReasoningEffort: high
